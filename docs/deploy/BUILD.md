@@ -1,7 +1,7 @@
 # 构建与运行
 
 > 状态：**现行**
-> 更新日期：2026-11-21
+> 更新日期：2026-11-23
 >
 > 适用范围：构建与运行：riscv 工具链、merge、量化、测试口径；读者为复现本仓库的人。
 > 相关：基线 [BASELINES](../measure/BASELINES.md)。
@@ -109,3 +109,40 @@ python -m pytest tests/test_rv_fusedexec.py -q        # 23 秒
 ```
 
 **注意**：`test_rv_fusedexec.py:18` 的 `CKPT` 指 `H:/sgfd9/models/q4-rv1-k0v2`。删掉那个 checkpoint 会让 3 个 merged 用例变成 skip（不是失败）。
+
+## 七、llama.cpp 侧（`Lqn-Llama` 分支）
+
+**fork 的是 K-Llama 的分段改造分支**（`rebase/onto-20261115`），不是上游 llama.cpp。
+
+```bash
+cd H:/llamacpp-c            # 已 checkout Lqn-Llama
+cmake --build build-split   # CPU 验证用（bit-exact 全部在这个构建上）
+cmake --build build-cuda    # GPU（RTX 4060 Laptop）
+```
+
+**三个必须知道的坑**：
+
+1. **`build-split` 的 ninja 依赖记录基本是空的**（`ninja -t deps` 多数对象 deps=0）。**改任何 `.h`
+   之后必须 `--clean-first`**，否则会产出 `.obj`/`.dll` 结构体布局不一致的构建，运行期直接崩。
+2. **`qwen35.cpp` 与 `llama-context.cpp` 都在 `unity_9` 里**。改 `.cpp` 后只 `--target llama` 会
+   「BUILD OK」但 dll 没变——**要删 `unity_9_cxx.cxx.obj` 再编**。
+3. **`-ngl N` 是 upstream 语义（从尾部 offload）**。chip 层上卡只能用
+   `-ot 'blk\.(?:[0-9]|1[0-3])\..*=CUDA0'`。
+
+**跑 chip 段**：
+
+```bash
+# 生产形态（窄头 + 稀疏 store + code_token）
+PATH="/h/llamacpp-c/build-split/bin:$PATH" LLAMA_CHIP_SPARSE=1 \
+  llama-cli -m D:/sgfd9/gguf/k0v5-q4km-mixed.gguf --split-layer-range 0:14 ...
+
+# 稀疏开关（默认开；关掉走 dense 路径，需要 k0v5a 那种 dense 全在的文件）
+LLAMA_CHIP_SPARSE=0
+
+# code_token 开关（默认 1：只在没有输出头时启用；force：有头也用；0：关闭）
+LLAMA_CHIP_CODE_TOKEN=0|1|force
+```
+
+**注意**：`code_token` 只在 **batch=1 且该段没有自己的输出头**时生效；prefill 口径下仍由 lm_head 回答。
+**初始 recurrent state 是程序的一部分**——逐 token 复现 c-crc32 时必须先注入（`llama_set_ssm_state`），
+零 state 会走另一条轨迹。

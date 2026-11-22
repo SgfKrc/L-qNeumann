@@ -6,13 +6,14 @@
 
 **面向「权重即主板」的系统化推理 · 基于 llama.cpp 与 ggml 的电路执行器 · 让冯诺依曼机在 Qwen3.5-4B 的权重里跑起来并跑快**
 
-> 状态：**v0.1 开发版**（选题 1 起跑线）
-> 更新日期：2026-11-21
+> 状态：**v0.1 开发版**（M1–M4 已完成，M5 端到端待做）
+> 更新日期：2026-11-23
 > 适用范围：电路侧推理引擎的定位、能力、基线、约束与文档索引。
 > 机制归 [`docs/design/ARCHITECTURE.md`](docs/design/ARCHITECTURE.md)，谱系归
 > [`docs/design/LINEAGE.md`](docs/design/LINEAGE.md)，边界归
 > [`docs/limits/ENGINE-LIMITS.md`](docs/limits/ENGINE-LIMITS.md)，实测口径归
-> [`docs/measurements/BASELINES.md`](docs/measurements/BASELINES.md)。
+> [`docs/measure/BASELINES.md`](docs/measure/BASELINES.md)，里程碑归
+> [`docs/measure/MILESTONES.md`](docs/measure/MILESTONES.md)。
 
 L-qNeumann 把 QwenPU 这套「CPU 编译进 LLM 权重」的模型**当成一台机器来跑**：13 层电路是 CPU、
 1 层 kernel 是加速器、32 层 Qwen 是语言层，token 流是总线，DeltaNet 状态是内存。它不是把模型
@@ -42,17 +43,25 @@ L-qNeumann 把 QwenPU 这套「CPU 编译进 LLM 权重」的模型**当成一�
 
 ## 基线（v0.1 起跑线）
 
-| 项 | 数字 | 来源 |
-|---|---:|---|
-| chip 步（生产路径，B=1） | **204.5 μs** | [BASELINES](docs/measure/BASELINES.md) |
-| chip 步（累计，从 830.6 起） | **4.06×** | O3-2 2.31× × gather 1.307× |
-| calc `4+3` | **326 token**（官方 767） | calc.c 清零精确化 + 延迟约分 |
-| 量化 checkpoint | **14.20 GiB** | 混合量化，chip + kernel 层逐字节未变 |
-| 语言能力 | = Qwen3.5-4B | 32 层 Qwen 未动 |
+**两条路的数字不能互算**：Triton 量「电路本身能跑多快」，llama.cpp 量「通用引擎跑同一段电路的
+端到端步进」。口径见 [BASELINES](docs/measure/BASELINES.md)。
 
-## 这个引擎在做什么（选题 1）
+| 路线 | 项 | 数字 |
+|---|---|---:|
+| **Triton v1** | chip 步（生产路径，B=1） | **204.5 μs** |
+| Triton v1 | chip 步累计（从 830.6 起） | **4.06×** |
+| **llama.cpp** | chip 段 0–13 步进（dense GPU） | **26.48 ms** |
+| **llama.cpp** | chip 段步进（稀疏 store，现行） | **3.40 ms**（相对 dense **7.8×**） |
+| llama.cpp | 46 层 + 全量头（CPU，单 token） | 380 ms |
+| llama.cpp | 生产 GGUF | **7.663 GiB**（窄头 + 稀疏 store + 程序化 embedding） |
+| 电路 | calc `4+3` | **326 token**（官方 767） |
+| 电路 | 语言能力 | = Qwen3.5-4B（32 层 Qwen 未动） |
 
-**把 chip 步从 204.5 μs 再压到 100 μs 以内。** 已定位瓶颈：
+## 这个引擎在做什么
+
+**一句话：把 chip 步从「读 5.30 GiB 权重」变成「读 8.30 MiB 的非零」，再往上压引擎税。**
+
+在 Triton 单实现上，瓶颈是随机访存而不是算力：
 
 ```
 chip 步 204.5 μs
@@ -62,8 +71,17 @@ chip 步 204.5 μs
 └─ 真正的计算     0.07%   ← 算力几乎没用上
 ```
 
-**不是算得慢，是搬数据慢。** 每次乘加要配 4 次随机读，而 GPU 的随机读吞吐只有算力的 1/41。
-所以引擎的优化目标是**减少随机访存次数**，不是提高 FLOPs。
+每次乘加要配 4 次随机读，而 GPU 的随机读吞吐只有算力的 1/41。**不是算得慢，是搬数据慢。**
+
+在 llama.cpp 上，这条诊断把方向定成了**稀疏执行**而不是手搓 kernel：
+
+| 阶段 | chip 步 | 瓶颈 |
+|---|---:|---|
+| dense，14 层 | 26.48 ms | **权重带宽**（4.92 GiB 读一遍） |
+| 稀疏 store，14 层 | **3.40 ms** | **建图/调度/launch**（每层约 15 个节点） |
+
+**5.30 GiB 权重里 99.96% 是零，只有 8.30 MiB 是非零。** 稀疏化之后，剩下的时间不再由数据量决定，
+而由「每层要发多少个 op」决定——所以下一步是融合 sublayer，不是继续抠存储。
 
 ## 快速开始
 
@@ -71,11 +89,15 @@ chip 步 204.5 μs
 # 1. 测试电路（内存验证，不写盘）
 cd qwenpu && python -m pytest tests/test_rv_ref.py tests/test_rv_core.py -q
 
-# 2. 跑 chip 步基线
+# 2. 跑 chip 步基线（Triton 口径）
 python -m chipformer.rv.fusedexec --timed3    # 或见 docs/deploy/BUILD.md
 
-# 3. 量化模型（产物 14.20 GiB）
-python -m chipformer.rv.merge ... --hidden 4608 --ballast 18 --kernel k0_kernel.npz --no-mute
+# 3. 合并 checkpoint（产物 22.87 GiB，46 层）
+python -m chipformer.rv.merge ... --vx --overlay --hidden 4608 --ballast 18 \
+  --kernel k0_kernel.npz --no-mute
+
+# 4. 量化 + 稀疏化（产物 7.663 GiB，生产形态）
+#    见 docs/deploy/BUILD.md §四/§七
 ```
 
 **环境**：Windows + WSL(Ubuntu-22.04) + Python 3.12 + torch 2.13+cu126 + RTX 4060 Laptop 8 GB。
@@ -92,7 +114,8 @@ riscv 工具链用 `wsl_build_calc.sh` 一键搭（见 `docs/deploy/BUILD.md`）
 | 视觉塔能做什么（rv1 里没有它） | [`docs/design/VISION-TOWER.md`](docs/design/VISION-TOWER.md) |
 | 和 qwenputer / QwenPU / torchwright 什么关系 | [`docs/design/LINEAGE.md`](docs/design/LINEAGE.md) |
 | 引擎的能力边界与架构代价（为什么慢 6 个数量级） | [`docs/limits/ENGINE-LIMITS.md`](docs/limits/ENGINE-LIMITS.md) |
-| 所有实测数字与口径 | [`docs/measurements/BASELINES.md`](docs/measurements/BASELINES.md) |
+| 所有实测数字与口径 | [`docs/measure/BASELINES.md`](docs/measure/BASELINES.md) |
+| **M1–M4 每个里程碑的结论与判据** | [`docs/measure/MILESTONES.md`](docs/measure/MILESTONES.md) |
 | 怎么构建、怎么跑 | [`docs/deploy/BUILD.md`](docs/deploy/BUILD.md) |
 | 引擎本体 | [`engine/`](engine/) |
 | 电路定义与黄金参考（纯 Python） | [`circuit/`](circuit/) |

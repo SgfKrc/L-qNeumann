@@ -1,7 +1,7 @@
 # 立项论证
 
 > 状态：**现行**
-> 更新日期：2026-11-21
+> 更新日期：2026-11-23
 >
 > 适用范围：立项论证：QwenPU 是什么、卡在哪、本项目补什么；读者为评审与立项决策者。
 > 相关：机制 [ARCHITECTURE](ARCHITECTURE.md)、谱系 [LINEAGE](LINEAGE.md)、边界 [ENGINE-LIMITS](../limits/ENGINE-LIMITS.md)。
@@ -131,7 +131,7 @@ K-Llama v1 做过「PyTorch 段 + llama.cpp 段」的跨框架接力，结局记
 |---|---|---|
 | N1 | **可部署性** | 8 GB 显存 + 31.6 GiB 内存单机能跑（14.20 GiB GGUF） |
 | N2 | **正确性** | 对 IR 逐位一致（不是「差不多」） |
-| N3 | **性能** | chip 步 ≤ 150 μs（参考基线见 [BASELINES](../measure/BASELINES.md)） |
+| N3 | **性能** | chip 步 ≤ 150 μs（Triton 口径的目标；**llama.cpp 口径已按实测修正为 3.40 ms**，见 [BASELINES](../measure/BASELINES.md) §一/§一之二） |
 | N4 | **可维护性** | 单一数值实现，零 PyTorch 依赖 |
 | N5 | **可验证性** | 有自动化验收（对 golden trace / IR） |
 
@@ -141,7 +141,7 @@ K-Llama v1 做过「PyTorch 段 + llama.cpp 段」的跨框架接力，结局记
 |---|---|---|
 | 1 | `engine/`：ggml 的 chip 执行器 | 单层前向对 IR bit-exact |
 | 2 | 完整推理路径 | 46 层跑通，输出与参考一致 |
-| 3 | 性能报告 | chip 步 ≤ 150 μs，逐层/逐算子剖析 |
+| 3 | 性能报告 | chip 步：Triton 口径 204.5 μs、llama.cpp 口径 3.40 ms（稀疏后），逐层/逐算子剖析 |
 | 4 | 验收装置 | 自动化 bit-exact 测试 |
 
 ## 八、不做什么（边界）

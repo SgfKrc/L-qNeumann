@@ -1,7 +1,7 @@
 # 谱系：L-qNeumann 站在谁的肩膀上
 
 > 状态：**现行**
-> 更新日期：2026-11-21
+> 更新日期：2026-11-23
 >
 > 适用范围：与 qwenputer / QwenPU / torchwright 的关系及本项目的全部改动；读者为 review 与上游回馈。
 > 相关：立项 [PROPOSAL](PROPOSAL.md)、基线 [BASELINES](../measure/BASELINES.md)。
@@ -93,7 +93,7 @@ torchwright 只能产无状态计算图，所以我们加了整套状态机。P3
 | 维度 | 说明 |
 |---|---|
 | **上游** | K-Llama 的 `rebase/onto-20261115` 分支（含 12 个分段改造提交） |
-| **本项目分支** | `Lqn-Llama`（5 个提交：A+B / loader / k0v4 稀疏 store / `ssm_state` / 稀疏 kernel） |
+| **本项目分支** | `Lqn-Llama`（7 个提交：A+B / loader / k0v4 稀疏 store / `ssm_state` / 稀疏 kernel / A+ / code_token） |
 | **为什么用 K-Llama** | 它保留 llama.cpp 的通用性（不吊死在千问上）；**我们不承担这个约束**——主板只跑 Qwen3.5-4B + chip 层 |
 | **魔改边界** | 加 op（`GGML_OP_CHIP_SPARSE_MM`）与图替换，**不改 llama.cpp 的通用路径** |
 
@@ -130,9 +130,11 @@ v1 曾判断「引擎留在 Python + Triton，因为移植到 ggml 是另一次�
 | **基座** | Qwen3.5-4B | 换 Qwen4 同尺寸系列 |
 | **chip 层** | 13 层（`core.build` 的产物） | **重新 merge**（`live_token_dims` 的 pinned 要按新 corpus 重算） |
 | **llama.cpp** | `Lqn-Llama` 分支 | 可能要 rebase 到 K-Llama 的最新上游 |
-| **稀疏 store** | 8.13 MiB（`blk.0-12`） | 重算 nnz；**`blk.13` 还没稀疏**（见薄引擎调研） |
+| **稀疏 store** | 8.30 MiB（`blk.0-13`，84 矩阵） | 重算 nnz（`blk.13` 只有 4,203，比 0–12 稀 10 倍） |
+| **读出** | `code_token`（21 列 → token id） | 表的来源（`chipformer.json` 的 `ranges`/`printable`）跟着 checkpoint 走 |
 | **验收** | c-crc32 4165/4165 | 同一套判据可复用 |
 
 **触发条件**：Qwen4 正式发布 + 其 GDN 参数（`linear_num_key_heads` / `linear_value_heads` / `conv_kernel_dim`）与 Qwen3.5 可比。
 
-**不急。** 当前 M1–M4 未收尾（`code_token` / A+ 待做）。
+**不急。** M1–M4 已收尾（A+ 与 `code_token` 均已完成，见 [MILESTONES](../measure/MILESTONES.md)），
+下一步是融合 sublayer 与 M5 端到端。

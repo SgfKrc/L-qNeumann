@@ -1,7 +1,7 @@
 # 架构：这台机器怎么组成
 
 > 状态：**现行**
-> 更新日期：2026-11-21
+> 更新日期：2026-11-23
 >
 > 适用范围：这台机器的四维资源（列×层×时间×状态）与五个插槽；读者为维护或移植该机制的开发者。
 > 相关：立项 [PROPOSAL](PROPOSAL.md)、谱系 [LINEAGE](LINEAGE.md)、实测 [BASELINES](../measure/BASELINES.md)。
@@ -57,6 +57,19 @@
 | 「学到的东西」 | 后 32 层 | 前 14 层是**编出来的**，不是学的 |
 
 **所以它是一块主板**：Qwen 32 层是 CPU/GPU（通用计算），前 14 层是外设（计算器/向量单元/kernel 加速器），残差流是总线，token 流是时钟。
+
+### 读出：chip token 的 id 就在 hidden 里，不用 lm_head
+
+残差的 21 个 code dim（`code_dims` 2725..2745，值域 ±2⁻²⁰）**直接就是下一个 chip token 的 id**：
+符号 = bit → 5 位 family + 16 位 payload → 查表。这条规则是参考实现 `chat.py` 的 `code_token`，
+在 llama.cpp 里已落地（`llama_context::decode` 把该位置整行 logits 写成 one-hot）。
+
+**这意味着 chip 区不需要那 3.383 GiB 的输出头**（`output.weight` 的 chip 行）。已验收：
+窄头 + code_token 的 c-crc32 teacher forcing **4165/4165**，argmax 与 fullhead 的 `lm_head`
+**4166/4166 逐位一致**——同一个 hidden 上的两条读出，数值路径完全不同。
+
+**零 state 跑不出它**：chip 段的初始 recurrent state 是程序的一部分（c-crc32 的非零 30,788 个），
+从零开始模型会认为程序执行了非法指令。详见 [MILESTONES](../measure/MILESTONES.md) M4c。
 
 ## 五、时间轴（一个 chip token 做什么）
 

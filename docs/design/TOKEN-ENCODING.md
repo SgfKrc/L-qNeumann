@@ -1,7 +1,7 @@
 # Token 编码：效率、可读性与信息论边界
 
 > 状态：**已决（2026-11-22）**
-> 更新日期：2026-11-22
+> 更新日期：2026-11-23
 >
 > 适用范围：token 流作为总线的编码设计边界；读者为想改词表/编码的人。
 > 相关：机制 [ARCHITECTURE](ARCHITECTURE.md)、基线 [BASELINES](../measure/BASELINES.md)、计划 [PLAN](PLAN.md)。
@@ -149,7 +149,9 @@ vocab_size = 642,496 = 248,320（Qwen 文本）+ 394,164（RV32 chip）+ 12
 
 **归属**：这既是「语义增强」也是「性能优化」——因为它能减少 text token 的数量（模型不需要被 dump 出所有细节就能理解程序）。
 
-**状态**：**待评估**。先做 A+B（两端裁剪，M4）、方向 1（按 token 选层）、C（稀疏存储），这三件是性能主线。
+**状态**：**待评估**（编码侧）。**读出侧已有实证**——`code_token` 让 chip token 直接由 hidden 的
+21 列解出、不走 lm_head，等于证明「token id 本来就在残差里」（见 [MILESTONES](../measure/MILESTONES.md) M4c）。
+族可读这件事仍要训练才成立，与「不动 Qwen」冲突仍在。
 
 ## 7. 替代方案（按性价比排序）
 
