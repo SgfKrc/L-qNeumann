@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build outputs
+out/
+build/
+
+# Model weights (never commit; they are 14–23 GiB)
+*.gguf
+*.safetensors
+*.bin
+models/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and scratch
+*.log
+_tmp/
+
+# Local-only (never commit)
+local_docs/
+.agents/
