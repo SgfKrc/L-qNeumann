@@ -170,14 +170,17 @@ M2 的难点在「**谁适应谁**」，而不在「实现一层前向」：
 
 | 顺序 | 任务 | 依据 |
 |---|---|---|
-| 1 | **消除 state 搬运的恒等拷贝**（`build_rs` 用 view 代替 gather） | 单序列下 14 层各搬 2 MB「自己→自己」，**每 token 56 MiB，是 chip 权重的 8 倍**；写侧已有 `ggml_cuda_try_gdn_cache_fusion`，读侧漏了。详见 [MILESTONES](../measure/MILESTONES.md) M4e |
-| 2 | **长行分流**（nnz>64 的行单独一个 kernel） | 稀疏 matvec 的 900 μs 里 800 是长尾（warp 内工作量不均），详见 [MILESTONES](../measure/MILESTONES.md) M4d |
+| ✅ 1 | **消除 state 搬运的恒等拷贝**（`build_rs` 用别名代替 gather） | 已完成（`861e3d659`）：**1.74 → 1.59 ms（−8.6%）**，bit-exact。单序列下 14 层各搬 2 MB「自己→自己」，**每 token 56 MiB，是 chip 权重的 8 倍**；写侧早有 `ggml_cuda_try_gdn_cache_fusion`，读侧漏了。详见 [MILESTONES](../measure/MILESTONES.md) M4e |
+| 2 | **按累加桶做行内并行**：长行（nnz>64）一个 warp 处理，lane `l` 只扫 `k%32 == l` 的非零 | 截断诊断证明 kernel 时间由 **`max nnz`（979）** 决定，不是 nnz 总量；32 个桶互不依赖、桶内按 j 升序 ⇒ **bit-exact 保持**。代价是把长行的 col/w 按桶重排进 store（**+约 1.2 MB**，8.3 → 9.5 MiB），预期 −0.35 ms。详见 [BASELINES](../measure/BASELINES.md) §一之二 |
 | 3 | **融合 sublayer**（`GGML_OP_CHIP_SUBLAYER`）：335 → 约 60 个 kernel | 预计再降一半；GDN 要么移植（bit-exact 风险）要么保留原生 |
 | 4 | **M5 端到端**：chip + Qwen 同进程跑完整 46 层，含 state 注入 | — |
 | 5 | 抽薄引擎（视 #3 的收益决定） | 再拿掉 ~0.3 ms 建图税 |
 
-**已经量清楚的事**：decode 的 GPU busy 1.525 ms 里，稀疏 matvec 占 59%，GDN 只占 5%，state 搬运占 13%；
-CPU 只占约 0.1 ms（CUDA graph 生效）。**优化目标必须落在 kernel 数与无效拷贝上，不是带宽、不是 CPU。**
+**已经量清楚的事**：decode 的 GPU busy 1.525 ms 里，稀疏 matvec 占 59%，GDN 只占 5%，state 搬运原占
+13%（已消除）；CPU 只占约 0.1 ms（CUDA graph 生效）。稀疏 matvec 那 800 μs 长尾**不是带宽、不是指令
+吞吐、也不是 x 的随机 gather**（三条截断诊断分别只值 6% / 12% / 20%），**是 m=1 的 matvec 天然欠并行**：
+并行单元等于 matvec 的行数（最窄的不到 256 个线程），最长的那一行串行跑完就是整个 kernel 的时间。
+**所以优化目标是行内并行度与 kernel 数，不是带宽、不是 CPU、也不是访存 locality。**
 
 ### 7.1 待办：`output.weight` 与 `token_embd` 的重复（省 2.131 GiB，暂不做）
 

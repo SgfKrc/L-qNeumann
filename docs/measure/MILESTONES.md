@@ -286,3 +286,13 @@ recurrent state（`n_embd_s = 524288`，**2 MB/层**）从 cache 拷到一个连
 n_rs == n_seqs` 时用 `ggml_view_2d` 代替 gather。条件全是现有入参，且 `size == 1` 是**构造性证明**
 （唯一 cell 的唯一映射就是 `[0]`，`rs_z` 也恒等于 `i`），不能用「通常恒等」的推断。
 **bit-exact**（不引入浮点运算，只是别名替换）。
+
+**已实施**（`861e3d659`，只改 `src/llama-graph.cpp`）：别名 `s` 自身（`states` 就是它的 2D reshape，
+字节与 stride 相同）。连带一处必要改动——图里再无 `s_copy` 的读者，scheduler 不给它分 buffer，5 个
+`set_input()` 的写入会撞 `GGML_ASSERT(buffer)`；抽成 `llm_rs_write_copy()`，无 buffer 时跳过**写入**
+但仍逐个调 `mctx->s_copy(i)`（它推进 rollback 快照槽位 `rs_idx`）。
+
+实测（同日背靠背、20 次中位）：**1.74 → 1.59 ms（−8.6%）**，no-graph 2.19 → 2.01；decode 段
+`k_get_rows_float_vec` 每 forward 14 → **0**。bit-exact：GPU 两条图各 15 dump（2,211,840 words）、
+CPU 46 层 + 642,496 logits（7,572,928 值）全 0 差异。**GPU busy 的同口径对比没拿到**（nsys 采不到
+CUDA graph 内的 kernel），证据只有墙钟与 kernel 计数两条。
