@@ -175,6 +175,8 @@ M2 的难点在「**谁适应谁**」，而不在「实现一层前向」：
 | 3 | **融合 sublayer**（`GGML_OP_CHIP_SUBLAYER`）：335 → 约 60 个 kernel | 预计再降一半；GDN 要么移植（bit-exact 风险）要么保留原生 |
 | ✅ 4 | **M5 端到端**：chip + Qwen 同进程跑完整 46 层，含 state 注入 | 已完成：46 层 GPU 跑通（7679/8188 MiB），GPU/CPU 两条贪心链的 token 序列 12/12 相同，**16.3 tok/s**。端到端分解见 [MILESTONES](../measure/MILESTONES.md) M5：**chip 段只占 5%** |
 | 5 | 抽薄引擎（视 #3 的收益决定） | 再拿掉 ~0.3 ms 建图税 |
+| 6 | **把 layer 0 移回 GPU**：现在 `token_embd` 为省显存落在 CPU，llama.cpp 的 input layer 连带整层 `blk.0` 也留在 CPU，每 token 走一次「CPU 算 → 同步 → 上 GPU」 | 实测 **4.2–5.1 ms/token**，占端到端的 8%，且是**纯浪费**——只需调整放置策略，不碰数值 |
+| 7 | **head 量化**（`output.weight` 2.13 GiB bf16，每 token 全读一遍） | 实测 12.79 ms / 179 GB/s，量化到 Q4_K 可省约 **6 ms**；代价是 head 与 token_embd 的 tied 化要重新考虑（见 §7.1） |
 
 **已经量清楚的事**：decode 的 GPU busy 1.525 ms 里，稀疏 matvec 占 59%，GDN 只占 5%，state 搬运原占
 13%（已消除）；CPU 只占约 0.1 ms（CUDA graph 生效）。三条截断诊断里，**不读 x 只值 6%、单累加器值

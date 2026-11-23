@@ -115,6 +115,31 @@ launch**，不是带宽——继续稀疏化已无收益，下一步只能融合
 **`concat` 的 GPU 时间**：非连续路径 `concat_non_cont` 22.59 → **11.06 μs/层**
 （展平 block 几何后），但**只在 prefill 上出现**；decode 走 `concat_cont`（2.18 μs）。
 
+**端到端 46 层的 58.7 ms 花在哪**（受控配置实测 51.08 ms，`M4_SYNC=1`，三种段长互相验证：
+
+全模型 51.08 / `1:46` 段 34.05 / `14:46` 段 27.48）：
+
+| 项 | ms | 有效带宽 | 性质 |
+|---|---:|---:|---|
+| 32 层 Qwen Q4_K 权重 | **27.48** | 132 GB/s（matvec 单 kernel 148） | 达对照的 86%，**正常** |
+| lm_head bf16 | **12.79** | 179 GB/s | 正常；量化可省约 **6 ms** |
+| chip 13 层（layer 1..13） | **6.57** | — | 权重仅约 2 MiB/层，**成本不在权重** |
+| layer 0 + token_embd（在 **CPU**） | **4.24–5.07** | — | **可消除**，见下 |
+
+**同卡同后端的对照**（这是判据，不是估计）：`Qwen3VL-8B-Q4_K_M` **172 GB/s**（34.16 t/s）、
+`dflash-merged-Q4_K_M` 178 GB/s（167.92 t/s）、本模型 lm_head bf16 **179 GB/s**、本模型 Q4_K matvec
+单个 kernel **157–167 GB/s**。**所以「Q4_K 在低端卡上固有低效」不成立**——之前那个 94 GB/s
+（5.5 GiB ÷ 58.7 ms）是把 head、chip 段和还在 CPU 上的 layer 0 一起摊进了分母，是除法假象。
+
+两处真正的异常：
+
+1. **layer 0 整层被放在 CPU**（`load_tensors: layer 0 assigned to device CPU`、
+   `offloaded 46/47 layers (blocks [1,46))`）。原因是 `token_embd` 为省显存被 override 到 CPU，
+   llama.cpp 的 input layer 也随之落到 CPU，于是**每个 token 都要走「CPU 算 layer 0 → 同步 → 上 GPU」**，
+   实测 **4.2–5.1 ms/token**。除 token_embd 外没有任何权重层回退。
+2. **chip 段 6.57 ms 里 `k_chip_sparse_mm` 只占约 2.7 ms**，其余来自每层约 26 个 norm/conv/concat/gdn
+   小 kernel 及其间隙——**这正是「融合 sublayer」的收益点**，稀疏核本身已经没什么可榨的了。
+
 **46 层的两端裁剪（A+B，单 token decode）**：
 
 | 配置 | CPU | GPU |
