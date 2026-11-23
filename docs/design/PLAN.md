@@ -170,11 +170,24 @@ M2 的难点在「**谁适应谁**」，而不在「实现一层前向」：
 
 | 顺序 | 任务 | 依据 |
 |---|---|---|
-| 1 | **查清 decode 的 14 次 `k_get_rows_float_vec`**（0.179 ms，12%） | 一个 token 的 embedding 只需 1 次查找，多出来的 13 次来源未明 |
-| 2 | **长行分流**（nnz>64 的行单独一个 kernel） | 稀疏 matvec 的 903 μs 里 800 是长尾（warp 内工作量不均），详见 [MILESTONES](../measure/MILESTONES.md) M4d |
-| 3 | **融合 sublayer**（`GGML_OP_CHIP_SUBLAYER`）：335 → 约 60 个 kernel | 预计 1.5 → 0.5–0.7 ms；GDN 要么移植（bit-exact 风险）要么保留原生 |
+| 1 | **消除 state 搬运的恒等拷贝**（`build_rs` 用 view 代替 gather） | 单序列下 14 层各搬 2 MB「自己→自己」，**每 token 56 MiB，是 chip 权重的 8 倍**；写侧已有 `ggml_cuda_try_gdn_cache_fusion`，读侧漏了。详见 [MILESTONES](../measure/MILESTONES.md) M4e |
+| 2 | **长行分流**（nnz>64 的行单独一个 kernel） | 稀疏 matvec 的 900 μs 里 800 是长尾（warp 内工作量不均），详见 [MILESTONES](../measure/MILESTONES.md) M4d |
+| 3 | **融合 sublayer**（`GGML_OP_CHIP_SUBLAYER`）：335 → 约 60 个 kernel | 预计再降一半；GDN 要么移植（bit-exact 风险）要么保留原生 |
 | 4 | **M5 端到端**：chip + Qwen 同进程跑完整 46 层，含 state 注入 | — |
 | 5 | 抽薄引擎（视 #3 的收益决定） | 再拿掉 ~0.3 ms 建图税 |
 
-**已经量清楚的事**：decode 的 GPU busy 1.525 ms 里，稀疏 matvec 占 59%，GDN 只占 5%；
-CPU 只占约 0.1 ms（CUDA graph 生效）。**所以优化目标必须落在 kernel 数上，不是带宽、不是 CPU。**
+**已经量清楚的事**：decode 的 GPU busy 1.525 ms 里，稀疏 matvec 占 59%，GDN 只占 5%，state 搬运占 13%；
+CPU 只占约 0.1 ms（CUDA graph 生效）。**优化目标必须落在 kernel 数与无效拷贝上，不是带宽、不是 CPU。**
+
+### 7.1 待办：`output.weight` 与 `token_embd` 的重复（省 2.131 GiB，暂不做）
+
+`k0v5` 的 GGUF 里 `token_embd.weight` 与 `output.weight` 都是 `[4608, 248320]` BF16、**逐字节相同**，
+白占 2.131 GiB。已在工作区查清可行性（`_k0v5/REPORT_TIED.md`），结论：
+
+- **`n_vocab` 来自 `vocab.n_tokens()`，与 `token_embd` 的行数无关**——所以「tied 会把词表缩成 248K」这个担心不成立
+- 唯一代码障碍是 `qwen35.cpp:309-317` 在「chip_emb 存在且没有独立 output」时直接 `throw`（它的理由是「tied head 必须是全词表」，忽略了 k0v5 的 head 本来就只需 248,320 行）
+- **陷阱**：input 层被钉死在 CPU。只删 `throw`、保留 `TENSOR_DUPLICATED` 的话两个 ctx 找不到同名 tensor，会各建一份 → **一个字节都不省，只省文件**。必须让 `output = tok_embd` 指针共享
+- **放置权衡**：共享且留在 CPU → 省 2.13 GiB VRAM 但每 token 要做一次 248K×4608 的 CPU matvec；共享 + `-ot 'token_embd\.weight=CUDA0'` → 省 2.13 GiB host RAM，速度不变
+- **代价**：`llama-quant.cpp` 用「没有 output.weight」判定 tied，会把 `token_embd` 按 output 类型量化，而 chip 表硬性要求 BF16 → **tied 化后不能再量化**
+
+**为什么暂不做**：它省的是磁盘与 RAM，不是 chip 步；而 lm_head 放 CPU 还是 GPU 是真实权衡，且会关掉量化这条路。

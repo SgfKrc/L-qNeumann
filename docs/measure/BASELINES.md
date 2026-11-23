@@ -66,10 +66,10 @@ launch**，不是带宽——继续稀疏化已无收益，下一步只能融合
 | 项 | 合计 | 实例 | 占 |
 |---|---:|---:|---:|
 | `k_chip_sparse_mm`（稀疏 matvec） | **0.903 ms** | 84 | **59%** |
-| `k_get_rows_float_vec` | 0.179 | 14 | 12% |
+| **`k_get_rows_float_vec`（SSM state 恒等搬运）** | **0.202** | 14 | **13%** |
 | `rms_norm_f32` | 0.126 | 69 | 8% |
 | `gated_delta_net_cuda` | 0.076 | 14 | 5% |
-| 其余 | 0.24 | — | 16% |
+| 其余 | 0.22 | — | 15% |
 
 **CPU 只占约 0.1 ms**（CUDA graph 已把 335 个 kernel 的 launch 压掉）。
 **稀疏 matvec 的 903 μs 里，43 个短 kernel 只花 103 μs，41 个长尾花 800 μs**

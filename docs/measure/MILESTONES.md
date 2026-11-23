@@ -260,3 +260,29 @@ Nsight Systems 按 kernel 级拆开（单 token decode，chip 段 0:14）：
 `ne0=4` 时 8192 个 block 里每块只有 4 个活线程。改成展平 `(i0,i1)` 平面后
 **22.59 → 11.06 μs/层**，prefill 段 GPU busy **3.749 → 3.585 ms（−4.4%）**。
 **decode 不受影响**（decode 走 `concat_cont` 快路径），prefill 墙钟被 CPU 建图限制，用户感知不到。
+
+### M4e（state 搬运）：每 token 搬 56 MiB 把 state 交给自己
+
+decode 段里那 14 个 `k_get_rows_float_vec` **不是 embedding**，是 14 个 chip 层各自把 GDN 的
+recurrent state（`n_embd_s = 524288`，**2 MB/层**）从 cache 拷到一个连续缓冲，发起者是
+`llm_graph_context::build_rs()`（`llama-graph.cpp`，调用点 `delta-net-base.cpp` 的 conv state
+与 `qwen35.cpp` 的 ssm state）。
+
+**单序列下这次拷贝是复制自己**：`rs_size = max(1, n_seq_max) = 1` ⇒ 唯一 cell 是 `[0]`、
+`head = 0`、`states_extra` 零行，源和目标是同一段 2 MB 字节。
+
+| 项 | 每 token |
+|---|---:|
+| chip 段真正的权重（稀疏 store） | **6.74 MiB** |
+| 为「把 state 交给自己」搬的数据（14 × 2 MB × 读+写） | **56 MiB** |
+
+**搬 state 的量是搬全部权重的 8 倍**，实测 **290 GB/s** 已顶到 4060 的带宽上限——不能更快，只能消掉。
+（prefill 时同样的搬运只要 5.0 μs = 1.2 TB/s，只可能是 L2 命中，反证这条路径是纯带宽受限。）
+
+**读写不对称是关键线索**：写侧早有 `ggml_cuda_try_gdn_cache_fusion`（让 GDN kernel 直接写 cache，
+省掉写回的 2 MB），**只有读侧漏了**。
+
+**修法**（P0）：在 `build_rs()` 里当 `state_copy->ne[0] == n_rs && rs_size == 1 && rs_head == 0 &&
+n_rs == n_seqs` 时用 `ggml_view_2d` 代替 gather。条件全是现有入参，且 `size == 1` 是**构造性证明**
+（唯一 cell 的唯一映射就是 `[0]`，`rs_z` 也恒等于 `i`），不能用「通常恒等」的推断。
+**bit-exact**（不引入浮点运算，只是别名替换）。
