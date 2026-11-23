@@ -246,15 +246,16 @@ Nsight Systems 按 kernel 级拆开（单 token decode，chip 段 0:14）：
 **decode 的 GPU busy 是 1.525 ms，CPU 只占约 0.1 ms**（CUDA graph 已把 launch 压掉），
 所以瓶颈确实在 GPU，但不在带宽——稀疏权重一层的非零只有 0.5 MB（按带宽 2.7 μs）。
 
-**稀疏 matvec 的 903 μs 里，长尾占 800**：84 个实例中前 43 个（0–4 μs）只花 103 μs，
-后 41 个（8–95 μs）花 800 μs。**这是结构性的**（两次 profile 慢 kernel 位置逐一对上），
-根因是**同一 warp 内工作量不均**——行 nnz 最长 979（blk.10 的 FFN_DOWN），
-`nnz>64` 的行只有 0.5% 却含 13.4% 的非零，长行独占一个线程时同 warp 其余 31 个线程已退出，
-`x[col[j]]` 的延迟完全暴露。
-
-**试过无效**：shared memory 预取 x（1.65 → 1.95 ms，occupancy 被压到 2 块/SM）、
-4-way unroll（1.65 → 1.72 ms，`acc[]` 别名使依赖读仍然串行）。
-**不破坏 bit-exact 就行内并行不了**：归约必须是 j 升序。
+**稀疏 matvec 的 903 μs 里，长尾占 800**：84 个实例中前 43 个（0–4 μs）只花 103 μs，后 41 个
+（8–95 μs）花 800 μs，**这是结构性的**（两次 profile 慢 kernel 位置逐一对上）。
+**四条截断诊断**（临时改 kernel、量完回退）：不读 x 值 6%、单累加器值 12%（破坏 bit-exact，纯诊断）、
+每行只算前 64 个非零值 20%。最后一条同时改掉「串行链」与「工作量」——`blk.10` 的 19 行长行占该矩阵
+78% 的非零，截断等于少算四分之三，证明不了并行度有用。真正分开两者的是**按 32 个累加桶把长行拆给
+一个 warp**（桶互不依赖、桶内仍按 j 升序，bit-exact 可保持）：no-graph **−18%**、graph **−4%（噪声内）**
+——**graph 里 84 个 matvec 本就并发，单 kernel 的延迟尾巴被盖住，生产路径是吞吐受限而非欠并行**。
+该改动已回退，补丁留档；见 [BASELINES](BASELINES.md) §一之二。
+**试过无效**：shared memory 预取 x（1.65 → 1.95 ms，occupancy 压到 2 块/SM）、4-way unroll
+（1.65 → 1.72 ms，`acc[]` 别名使依赖读仍然串行），行内并行本身并不违反 bit-exact（按桶拆可以）。
 
 **修好的**：`ggml-cuda/concat.cu` 的非连续 concat 按「一 block 一列」启动，
 `ne0=4` 时 8192 个 block 里每块只有 4 个活线程。改成展平 `(i0,i1)` 平面后
