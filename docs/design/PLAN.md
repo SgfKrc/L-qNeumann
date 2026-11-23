@@ -115,7 +115,7 @@ M2 的难点在「**谁适应谁**」，而不在「实现一层前向」：
 | **R2** | `llama_memory_recurrent` 的布局装不下 chip 状态 | M1 卡死 | 自建 state buffer | ✅ **未发生**（1:1） |
 | **R3** | ggml 的 kernel 性能不如 Triton | M4 达不到 150 μs | 移植 head 拆 CTA、load 交织 | ⚠️ **成立**：dense 26.5 ms；稀疏后 3.40 ms |
 | **R4** | `ggml_set_rows` 不保 bf16 精度 | ballast 写入失真 | 手写 scatter kernel | ✅ **未发生** |
-| **R5** | 完整模型在 8 GB 卡上的 offload 调度 | M5 跑不动 | 分段 + 各自全上卡 | 待 M5 |
+| **R5** | 完整模型在 8 GB 卡上的 offload 调度 | M5 跑不动 | 分段 + 各自全上卡 | ⚠️ **部分成立**：46 层全上卡 7679/8188 MiB（93.8%），能跑但 16.3 tok/s，余量仅 500 MiB |
 | **R6** | 初始 recurrent state 是程序的一部分，零 state 跑出另一条轨迹 | 端到端复现不了 | 逐 token decode 前注入 state（`llama_set_ssm_state`） | ✅ **已定位**（见 MILESTONES M4c） |
 
 ## 4. 里程碑判据
@@ -125,7 +125,7 @@ M2 的难点在「**谁适应谁**」，而不在「实现一层前向」：
 | **M2 通过** | 改后的电路在 ggml 下对 `ir.evaluate` 逐位一致（0 差异） | ✅ **是** |
 | **M3 通过** | golden trace 全过（130 个测试） | ✅ **是** |
 | **M4 达标** | ~~chip 步 ≤ 150 μs~~ → **dense 不可达**；现行地板 **3.40 ms**（稀疏），融合后可到 ~1 ms | 软目标，已按实测修正 |
-| **M5 通过** | 46 层跑通，logits 一致 | ✅ **是** |
+| **M5 通过** | 46 层跑通，GPU 与 CPU 两条贪心链的 token 序列逐 token 相同 | ✅ **是**（12/12，16.3 tok/s；跨后端逐位 logits 不成立，见 MILESTONES M5） |
 
 **位精确是硬门槛**（M2/M3/M5），**性能是软目标**（M4）。
 
@@ -173,7 +173,7 @@ M2 的难点在「**谁适应谁**」，而不在「实现一层前向」：
 | ✅ 1 | **消除 state 搬运的恒等拷贝**（`build_rs` 用别名代替 gather） | 已完成（`861e3d659`）：**1.74 → 1.59 ms（−8.6%）**，bit-exact。单序列下 14 层各搬 2 MB「自己→自己」，**每 token 56 MiB，是 chip 权重的 8 倍**；写侧早有 `ggml_cuda_try_gdn_cache_fusion`，读侧漏了。详见 [MILESTONES](../measure/MILESTONES.md) M4e |
 | ~~2~~ | ~~按累加桶做行内并行~~ | **已试并回退**：graph 模式只值 −4%（噪声内），no-graph 值 −18%。graph 里 84 个 matvec 本就并发，单 kernel 的延迟尾巴被盖住，**生产路径是吞吐受限**。详见 [BASELINES](../measure/BASELINES.md) §一之二 |
 | 3 | **融合 sublayer**（`GGML_OP_CHIP_SUBLAYER`）：335 → 约 60 个 kernel | 预计再降一半；GDN 要么移植（bit-exact 风险）要么保留原生 |
-| 4 | **M5 端到端**：chip + Qwen 同进程跑完整 46 层，含 state 注入 | — |
+| ✅ 4 | **M5 端到端**：chip + Qwen 同进程跑完整 46 层，含 state 注入 | 已完成：46 层 GPU 跑通（7679/8188 MiB），GPU/CPU 两条贪心链的 token 序列 12/12 相同，**16.3 tok/s**。端到端分解见 [MILESTONES](../measure/MILESTONES.md) M5：**chip 段只占 5%** |
 | 5 | 抽薄引擎（视 #3 的收益决定） | 再拿掉 ~0.3 ms 建图税 |
 
 **已经量清楚的事**：decode 的 GPU busy 1.525 ms 里，稀疏 matvec 占 59%，GDN 只占 5%，state 搬运原占

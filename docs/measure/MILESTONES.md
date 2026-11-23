@@ -1,4 +1,4 @@
-# 里程碑记录：M1–M4 与两条收尾
+# 里程碑记录：M1–M5 与两条收尾
 
 > 状态：**现行**
 > 更新日期：2026-11-23
@@ -231,36 +231,22 @@ c-crc32 的 teacher forcing 有**初始 recurrent state**（13 层 × 524,288 fl
 **限制**：只对 batch=1 生效（prefill 口径仍由 lm_head 回答）；printable 表在代码里，换 tokenizer 要重生成；
 `QWEN35_CHIP_LAYERS = 13` 仍是硬编码（`chipformer.json` 的 `chip_layers`，GGUF 与 blob 都不带）。
 
-### M4d（性能剖析）：1.53 ms 的 GPU 时间在哪，以及修好了什么
+### M4d（性能剖析）：GPU 时间在哪，以及修好了什么
 
-Nsight Systems 按 kernel 级拆开（单 token decode，chip 段 0:14）：
+Nsight Systems 按 kernel 级拆开（单 token decode，chip 段 0:14）：稀疏 matvec **0.903 ms（59%）**、
+`k_get_rows_float_vec` 0.179（12%，**已由 M4e 消除**）、`rms_norm_f32` 0.126（8%）、
+`gated_delta_net_cuda` 0.076（5%）、其余 0.24（16%）。**GPU busy 1.525 ms，CPU 只占约 0.1 ms**
+（CUDA graph 把 launch 压掉了）——瓶颈在 GPU，但不在带宽：一层稀疏权重只有 0.5 MB（按带宽 2.7 μs）。
 
-| 项 | 合计 | 实例 | 占 |
-|---|---:|---:|---:|
-| **`k_chip_sparse_mm<false>`** | **0.903 ms** | 84 | **59%** |
-| `k_get_rows_float_vec` | 0.179 | 14 | 12%（**未查清**） |
-| `rms_norm_f32<1024,4>` | 0.126 | 69 | 8% |
-| `gated_delta_net_cuda` | 0.076 | 14 | 5% |
-| 其余（add / cpy / silu / conv / concat） | 0.24 | — | 16% |
+**稀疏 matvec 的 903 μs 里长尾占 800**：84 个实例中前 43 个（0–4 μs）只花 103 μs，后 41 个花 800 μs，
+两次 profile 位置逐一对上。**四条截断诊断**（临时改 kernel、量完回退）：不读 x 值 6%、单累加器
+值 12%（破坏 bit-exact，纯诊断）、每行只算前 64 个非零值 20%。最后一条同时改掉「串行链」与
+「工作量」——`blk.10` 的 19 行长行占该矩阵 78% 的非零，截断等于少算四分之三。把两者分开的是
+**按 32 个累加桶把长行拆给一个 warp**（桶互不依赖、桶内仍按 j 升序，bit-exact 可保持）：no-graph
+**−18%**、graph **−4%（噪声内）**——graph 里 84 个 matvec 本就并发，延迟尾巴被盖住。已回退留档。
 
-**decode 的 GPU busy 是 1.525 ms，CPU 只占约 0.1 ms**（CUDA graph 已把 launch 压掉），
-所以瓶颈确实在 GPU，但不在带宽——稀疏权重一层的非零只有 0.5 MB（按带宽 2.7 μs）。
-
-**稀疏 matvec 的 903 μs 里，长尾占 800**：84 个实例中前 43 个（0–4 μs）只花 103 μs，后 41 个
-（8–95 μs）花 800 μs，**这是结构性的**（两次 profile 慢 kernel 位置逐一对上）。
-**四条截断诊断**（临时改 kernel、量完回退）：不读 x 值 6%、单累加器值 12%（破坏 bit-exact，纯诊断）、
-每行只算前 64 个非零值 20%。最后一条同时改掉「串行链」与「工作量」——`blk.10` 的 19 行长行占该矩阵
-78% 的非零，截断等于少算四分之三，证明不了并行度有用。真正分开两者的是**按 32 个累加桶把长行拆给
-一个 warp**（桶互不依赖、桶内仍按 j 升序，bit-exact 可保持）：no-graph **−18%**、graph **−4%（噪声内）**
-——**graph 里 84 个 matvec 本就并发，单 kernel 的延迟尾巴被盖住，生产路径是吞吐受限而非欠并行**。
-该改动已回退，补丁留档；见 [BASELINES](BASELINES.md) §一之二。
-**试过无效**：shared memory 预取 x（1.65 → 1.95 ms，occupancy 压到 2 块/SM）、4-way unroll
-（1.65 → 1.72 ms，`acc[]` 别名使依赖读仍然串行），行内并行本身并不违反 bit-exact（按桶拆可以）。
-
-**修好的**：`ggml-cuda/concat.cu` 的非连续 concat 按「一 block 一列」启动，
-`ne0=4` 时 8192 个 block 里每块只有 4 个活线程。改成展平 `(i0,i1)` 平面后
-**22.59 → 11.06 μs/层**，prefill 段 GPU busy **3.749 → 3.585 ms（−4.4%）**。
-**decode 不受影响**（decode 走 `concat_cont` 快路径），prefill 墙钟被 CPU 建图限制，用户感知不到。
+**修好的**：`concat.cu` 的非连续 concat 按「一 block 一列」启动，`ne0=4` 时 8192 个 block 里每块只有
+4 个活线程；展平 `(i0,i1)` 平面后 **22.59 → 11.06 μs/层**，prefill GPU busy **−4.4%**，decode 不受影响。
 
 ### M4e（state 搬运）：每 token 搬 56 MiB 把 state 交给自己
 
@@ -297,3 +283,17 @@ n_rs == n_seqs` 时用 `ggml_view_2d` 代替 gather。条件全是现有入参�
 `k_get_rows_float_vec` 每 forward 14 → **0**。bit-exact：GPU 两条图各 15 dump（2,211,840 words）、
 CPU 46 层 + 642,496 logits（7,572,928 值）全 0 差异。**GPU busy 的同口径对比没拿到**（nsys 采不到
 CUDA graph 内的 kernel），证据只有墙钟与 kernel 计数两条。
+
+### M5（端到端）：46 层同进程，GPU 16.3 tok/s，chip 段只占 5%
+
+`k0v5` 全 46 层在 GPU 上单进程跑通（`ngl=46`，显存 **7679/8188 MiB**），47 个 layer input + logits
+dump 成功，**argmax 148466 与 CPU 全模型参考一致**；chip 段（0:14）与参考**逐位相同**（max|d| = 0），
+Qwen 段因两边 Q4_K 实现不同而有差异并逐层累积（max|d| 到 4.4），argmax 仍一致。
+
+**验收用贪心生成**（跨后端逐位比 logits 不可能过）：同一合成 prompt，GPU 与 CPU 各生成 12 个 token，
+**序列逐 token 相同**，两条链各重跑一遍逐位复现。**GPU 16.3 tok/s / CPU 6.7 tok/s**。
+**局限**：prompt 是合成 token id 不是自然语言；同 token 的 logit 差 0.016–0.81，step 1 的 top-1
+margin 只有 0.268（最脆的一步）；只测 N=12。
+
+**端到端分解**（`llama_synchronize` 口径）：46 层 **61.8 ms**，其中 **chip 段 3.15 ms（5%）**、
+Qwen 段 + head 58.7 ms（95%）——**稀疏执行器已不是端到端瓶颈**，核内优化的上限是 5%。
