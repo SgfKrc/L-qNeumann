@@ -168,8 +168,13 @@ M2 的难点在「**谁适应谁**」，而不在「实现一层前向」：
 
 ## 7. 下一步
 
-| 顺序 | 任务 | 依赖 |
+| 顺序 | 任务 | 依据 |
 |---|---|---|
-| 1 | **融合 sublayer**（`GGML_OP_CHIP_SUBLAYER`）：3.40 → ~0.55–0.65 ms | 无 |
-| 2 | **M5 端到端**：chip + Qwen 同进程跑完整 46 层，含 state 注入 | #1、分段链 |
-| 3 | 抽薄引擎（视 #1 的收益决定） | #1 |
+| 1 | **查清 decode 的 14 次 `k_get_rows_float_vec`**（0.179 ms，12%） | 一个 token 的 embedding 只需 1 次查找，多出来的 13 次来源未明 |
+| 2 | **长行分流**（nnz>64 的行单独一个 kernel） | 稀疏 matvec 的 903 μs 里 800 是长尾（warp 内工作量不均），详见 [MILESTONES](../measure/MILESTONES.md) M4d |
+| 3 | **融合 sublayer**（`GGML_OP_CHIP_SUBLAYER`）：335 → 约 60 个 kernel | 预计 1.5 → 0.5–0.7 ms；GDN 要么移植（bit-exact 风险）要么保留原生 |
+| 4 | **M5 端到端**：chip + Qwen 同进程跑完整 46 层，含 state 注入 | — |
+| 5 | 抽薄引擎（视 #3 的收益决定） | 再拿掉 ~0.3 ms 建图税 |
+
+**已经量清楚的事**：decode 的 GPU busy 1.525 ms 里，稀疏 matvec 占 59%，GDN 只占 5%；
+CPU 只占约 0.1 ms（CUDA graph 生效）。**所以优化目标必须落在 kernel 数上，不是带宽、不是 CPU。**

@@ -51,7 +51,7 @@ L-qNeumann 把 QwenPU 这套「CPU 编译进 LLM 权重」的模型**当成一�
 | **Triton v1** | chip 步（生产路径，B=1） | **204.5 μs** |
 | Triton v1 | chip 步累计（从 830.6 起） | **4.06×** |
 | **llama.cpp** | chip 段 0–13 步进（dense GPU） | **26.48 ms** |
-| **llama.cpp** | chip 段步进（稀疏 store，现行） | **3.40 ms**（相对 dense **7.8×**） |
+| **llama.cpp** | chip 段步进（稀疏 store） | **3.40 ms**（同轮对照；次日同配置测到 **1.65 ms**，GPU 降频差异） |
 | llama.cpp | 46 层 + 全量头（CPU，单 token） | 380 ms |
 | llama.cpp | 生产 GGUF | **7.663 GiB**（窄头 + 稀疏 store + 程序化 embedding） |
 | 电路 | calc `4+3` | **326 token**（官方 767） |

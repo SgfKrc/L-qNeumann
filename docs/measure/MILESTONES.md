@@ -230,3 +230,33 @@ c-crc32 的 teacher forcing 有**初始 recurrent state**（13 层 × 524,288 fl
 
 **限制**：只对 batch=1 生效（prefill 口径仍由 lm_head 回答）；printable 表在代码里，换 tokenizer 要重生成；
 `QWEN35_CHIP_LAYERS = 13` 仍是硬编码（`chipformer.json` 的 `chip_layers`，GGUF 与 blob 都不带）。
+
+### M4d（性能剖析）：1.53 ms 的 GPU 时间在哪，以及修好了什么
+
+Nsight Systems 按 kernel 级拆开（单 token decode，chip 段 0:14）：
+
+| 项 | 合计 | 实例 | 占 |
+|---|---:|---:|---:|
+| **`k_chip_sparse_mm<false>`** | **0.903 ms** | 84 | **59%** |
+| `k_get_rows_float_vec` | 0.179 | 14 | 12%（**未查清**） |
+| `rms_norm_f32<1024,4>` | 0.126 | 69 | 8% |
+| `gated_delta_net_cuda` | 0.076 | 14 | 5% |
+| 其余（add / cpy / silu / conv / concat） | 0.24 | — | 16% |
+
+**decode 的 GPU busy 是 1.525 ms，CPU 只占约 0.1 ms**（CUDA graph 已把 launch 压掉），
+所以瓶颈确实在 GPU，但不在带宽——稀疏权重一层的非零只有 0.5 MB（按带宽 2.7 μs）。
+
+**稀疏 matvec 的 903 μs 里，长尾占 800**：84 个实例中前 43 个（0–4 μs）只花 103 μs，
+后 41 个（8–95 μs）花 800 μs。**这是结构性的**（两次 profile 慢 kernel 位置逐一对上），
+根因是**同一 warp 内工作量不均**——行 nnz 最长 979（blk.10 的 FFN_DOWN），
+`nnz>64` 的行只有 0.5% 却含 13.4% 的非零，长行独占一个线程时同 warp 其余 31 个线程已退出，
+`x[col[j]]` 的延迟完全暴露。
+
+**试过无效**：shared memory 预取 x（1.65 → 1.95 ms，occupancy 被压到 2 块/SM）、
+4-way unroll（1.65 → 1.72 ms，`acc[]` 别名使依赖读仍然串行）。
+**不破坏 bit-exact 就行内并行不了**：归约必须是 j 升序。
+
+**修好的**：`ggml-cuda/concat.cu` 的非连续 concat 按「一 block 一列」启动，
+`ne0=4` 时 8192 个 block 里每块只有 4 个活线程。改成展平 `(i0,i1)` 平面后
+**22.59 → 11.06 μs/层**，prefill 段 GPU busy **3.749 → 3.585 ms（−4.4%）**。
+**decode 不受影响**（decode 走 `concat_cont` 快路径），prefill 墙钟被 CPU 建图限制，用户感知不到。

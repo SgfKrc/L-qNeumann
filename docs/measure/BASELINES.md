@@ -49,13 +49,34 @@ llama.cpp 路的数字在 §一之二，两节不可直接相减或相除。**
 | 配置 | chip 步 | 说明 |
 |---|---:|---|
 | dense GPU，14 层 | **26.48 ms** | 读 4.92 GiB 权重，纯带宽 |
-| sparse GPU，13 层 store（`blk.13` 仍 dense） | **5.11 ms** | A+ 前 |
-| **sparse GPU，14 层 store（现行）** | **3.40 ms** | A+ 后，**相对 dense 7.8×** |
+| sparse GPU，13 层 store（`blk.13` 仍 dense） | **5.11 ms** | A+ 前（同轮对照） |
+| **sparse GPU，14 层 store（A+ 后）** | **3.40 ms** | 同轮对照，**相对 dense 7.8×** |
+| sparse GPU，14 层 store（次日再测） | **1.65 ms** | 同一配置换一天，GPU SM 时钟 2250/3105 MHz |
 | sparse CPU 8 线程，14 层 | 27.35 ms | 无 GPU 时的退路 |
+
+**⚠️ 这张表里 3.40 与 1.65 是同一配置换一天测的，差 2 倍——笔记本 GPU 的时钟/热状态造成的。**
+**只有同轮对照可信**（5.11 → 3.40 是同一天同一轮）。引用 chip 步时必须同时给出「哪个配置、哪天、是否同轮」。
 
 **A+ 的同轮对照 −1.71 ms（−33.5%）**。反算 blk.13 的带宽：387.1 MiB / 1.71 ms ≈ **226 GB/s**，
 与 RTX 4060 Laptop 的 ~256 GB/s 同量级。3.40 ms 的剩余主体是 14 层 × 约 15 节点/层的**建图、调度与
 launch**，不是带宽——继续稀疏化已无收益，下一步只能融合 sublayer。
+
+**decode 的 GPU 时间实测分解**（Nsight Systems，单 token，chip 段 0:14，GPU busy **1.525 ms**）：
+
+| 项 | 合计 | 实例 | 占 |
+|---|---:|---:|---:|
+| `k_chip_sparse_mm`（稀疏 matvec） | **0.903 ms** | 84 | **59%** |
+| `k_get_rows_float_vec` | 0.179 | 14 | 12% |
+| `rms_norm_f32` | 0.126 | 69 | 8% |
+| `gated_delta_net_cuda` | 0.076 | 14 | 5% |
+| 其余 | 0.24 | — | 16% |
+
+**CPU 只占约 0.1 ms**（CUDA graph 已把 335 个 kernel 的 launch 压掉）。
+**稀疏 matvec 的 903 μs 里，43 个短 kernel 只花 103 μs，41 个长尾花 800 μs**
+（行 nnz 最长 979，warp 内工作量不均）。
+
+**`concat` 的 GPU 时间**：非连续路径 `concat_non_cont` 22.59 → **11.06 μs/层**
+（展平 block 几何后），但**只在 prefill 上出现**；decode 走 `concat_cont`（2.18 μs）。
 
 **46 层的两端裁剪（A+B，单 token decode）**：
 
