@@ -146,3 +146,27 @@ LLAMA_CHIP_CODE_TOKEN=0|1|force
 **注意**：`code_token` 只在 **batch=1 且该段没有自己的输出头**时生效；prefill 口径下仍由 lm_head 回答。
 **初始 recurrent state 是程序的一部分**——逐 token 复现 c-crc32 时必须先注入（`llama_set_ssm_state`），
 零 state 会走另一条轨迹。
+
+## 六、构建陷阱：改了任何 `.h` 都必须全量重编
+
+两个 build 目录（`build-cuda` 与 `build-split`）的 ninja 依赖记录是空的（`ninja -t deps` 多数对象
+`deps=0`，尽管 `rules.ninja` 里有 `deps = msvc`）。后果：**改头文件不会触发重编**，增量构建会产出
+结构体布局不一致的混合 ABI。它不报错、不警告，运行期才崩。
+
+两次实测：
+
+- 改 `llama-hparams.h` 之后，vocab-only 加载 SIGSEGV。
+- 2026-11-23 在 `models.h` 里给 `llama_model_qwen35` 加了 5 个 `chip_sparse_*` 指针成员。`build-cuda`
+  的 12 个 unity 在 11:20–11:21 重编了，但 `llama-model.cpp.obj` **没有**重编（ninja 报 `no work to
+  do`），链接出的 `llama.dll` 里**该对象小 40 字节**。于是标准 Qwen3.5 模型（文件里没有 chip store，
+  `n_chip == 0`，五个成员从未赋值）在 `load_arch_tensors()` 里解引用对象尾之外的野指针，**exit 139，
+  崩在 `cls.output.bias` 之后**；而 k0v5 因为五个成员都被赋了值、写完立刻读回同一批地址，**反而
+  自洽不崩**——**只测 k0v5 永远发现不了这个问题**。
+
+规矩三条：
+
+1. 改过任何 `.h`：`ninja -t clean` 之后**两个 build 目录都全量重编**。
+2. 编完**核对 `bin/*.dll` 的 mtime 比 `src/` 与 `ggml/src/` 下所有源文件都新**。不核对就等于在测
+   旧 dll 或者坏 dll。
+3. **不要**跑不带目标的 `ninja -C build-cuda`：它会先跑 UI 资源步骤，断网时停在 `[2/103]` 并静默
+   失败。用显式目标，例如 `ninja -C build-cuda bin/llama.dll`。
