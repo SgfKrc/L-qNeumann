@@ -161,7 +161,7 @@ launch**，不是带宽——继续稀疏化已无收益，下一步只能融合
 
 | 项 | 数字 |
 |---|---|
-| chip 层 dense 权重 | **5.30 GiB**（84 矩阵）→ 稀疏 **8.30 MiB**（619×） |
+| chip 层 dense 权重 | **5.30 GiB**（84 矩阵）→ 稀疏 **8.30 MiB**（653.7×，精确字节） |
 | chip token embedding | 394,164 行 → **826 B**（程序化，省 3.38 GiB） |
 | 窄头替代 fullhead | 省 **3.383 GiB**（code_token 读出） |
 | 生产 GGUF | `k0v5-q4km-mixed` **7.663 GiB**（fullhead 对照 11.046 GiB） |

@@ -115,7 +115,7 @@ riscv 工具链用 `wsl_build_calc.sh` 一键搭（见 `docs/deploy/BUILD.md`）
 | 视觉塔能做什么（rv1 里没有它） | [`docs/design/VISION-TOWER.md`](docs/design/VISION-TOWER.md) |
 | 和 qwenputer / QwenPU / torchwright 什么关系 | [`docs/design/LINEAGE.md`](docs/design/LINEAGE.md) |
 | 引擎的能力边界与架构代价（为什么慢 6 个数量级） | [`docs/limits/ENGINE-LIMITS.md`](docs/limits/ENGINE-LIMITS.md) |
-| **权重为什么能压 619 倍、训练层为什么不能**（三种熵） | [`docs/limits/WEIGHT-ENTROPY.md`](docs/limits/WEIGHT-ENTROPY.md) |
+| **权重为什么能压 654 倍、训练层为什么不能**（三种熵） | [`docs/limits/WEIGHT-ENTROPY.md`](docs/limits/WEIGHT-ENTROPY.md) |
 | 所有实测数字与口径 | [`docs/measure/BASELINES.md`](docs/measure/BASELINES.md) |
 | **M1–M4 每个里程碑的结论与判据** | [`docs/measure/MILESTONES.md`](docs/measure/MILESTONES.md) |
 | 怎么构建、怎么跑 | [`docs/deploy/BUILD.md`](docs/deploy/BUILD.md) |
